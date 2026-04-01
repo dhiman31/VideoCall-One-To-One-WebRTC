@@ -1,121 +1,166 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useEffect, useRef } from "react"
 
-function App() {
-  const [count, setCount] = useState(0)
+export default function App() {
+
+  const [roomCode, setRoomCode] = useState("")
+  const roomCodeRef = useRef("")
+  const wsRef = useRef(null)
+  const lcRef = useRef(null)
+
+  useEffect(() => {
+    roomCodeRef.current = roomCode
+  }, [roomCode])
+
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:3000")
+    wsRef.current = ws
+
+    ws.onopen = () => console.log("WS connected")
+
+    ws.onmessage = async (event) => {
+      const data = JSON.parse(event.data)
+      console.log("📩 WS message:", data.type)
+
+      if (data.type === "offer") {
+        console.log("Offer received")
+
+        if (!lcRef.current) {
+          await createPeerConnection()
+        }
+
+        await lcRef.current.setRemoteDescription(data.offer)
+        const answer = await lcRef.current.createAnswer()
+        await lcRef.current.setLocalDescription(answer)
+
+        ws.send(JSON.stringify({
+          type: "answer",
+          roomCode: roomCodeRef.current,
+          answer: lcRef.current.localDescription
+        }))
+
+        console.log("📤 Answer sent")
+      }
+
+      if (data.type === "answer") {
+        console.log("📥 Answer received")
+        await lcRef.current.setRemoteDescription(data.answer)
+      }
+
+      if (data.type === "ice") {
+        console.log("📥 ICE received")
+        if (data.candidate && lcRef.current) {
+          try {
+            await lcRef.current.addIceCandidate(data.candidate)
+          } catch (e) {
+            console.warn("ICE add failed:", e)
+          }
+        }
+      }
+    }
+
+    ws.onerror = (e) => console.error("WS error:", e)
+    ws.onclose = () => console.log("WS closed")
+
+    return () => ws.close()
+  }, [])
+
+  async function createPeerConnection() {
+    const lc = new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: "turn:openrelay.metered.ca:80",
+          username: "openrelayproject",
+          credential: "openrelayproject"
+        }
+      ]
+    })
+
+    lcRef.current = lc
+
+    lc.onicecandidate = (e) => {
+      if (e.candidate) {
+        console.log("Sending ICE")
+        wsRef.current.send(JSON.stringify({
+          type: "ice",
+          roomCode: roomCodeRef.current,
+          candidate: e.candidate
+        }))
+      }
+    }
+
+    lc.ontrack = (e) => {
+      console.log("Remote track received")
+      document.getElementById("remoteVideo").srcObject = e.streams[0]
+    }
+
+    lc.onconnectionstatechange = () => {
+      console.log("Connection state:", lc.connectionState)
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    document.getElementById("localVideo").srcObject = stream
+    stream.getTracks().forEach(track => lc.addTrack(track, stream))
+
+    return lc
+  }
+
+  async function createRoom() {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("WS not ready")
+      return
+    }
+
+    await createPeerConnection()
+
+    ws.send(JSON.stringify({ type: "create", roomCode: roomCodeRef.current }))
+
+    const offer = await lcRef.current.createOffer()
+    await lcRef.current.setLocalDescription(offer)
+
+    ws.send(JSON.stringify({
+      type: "offer",
+      roomCode: roomCodeRef.current,
+      offer: lcRef.current.localDescription
+    }))
+
+    console.log("📤 Offer sent")
+  }
+
+  async function joinRoom() {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("WS not ready")
+      return
+    }
+
+    await createPeerConnection()
+
+    ws.send(JSON.stringify({ type: "join", roomCode: roomCodeRef.current }))
+
+    console.log("📤 Join sent, waiting for offer...")
+  }
 
   return (
     <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+      <h1>Video Calling 1-1</h1>
 
-      <div className="ticks"></div>
+      <input
+        placeholder="Room Code"
+        value={roomCode}
+        onChange={(e) => setRoomCode(e.target.value)}
+      />
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      <br /><br />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
+      <button onClick={createRoom}>Create Room</button>
+      <button onClick={joinRoom} style={{ marginLeft: 10 }}>Join Room</button>
+
+      <br /><br />
+
+      <video id="localVideo" autoPlay muted width="300" />
+      <video id="remoteVideo" autoPlay playsInline width="300" />
     </>
   )
 }
-
-export default App
