@@ -60,7 +60,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:3000")
+    const ws = new WebSocket(`ws://${process.env.serverURL}:3000`)
     wsRef.current = ws
 
     ws.onopen = () => console.log("WS connected")
