@@ -16,7 +16,7 @@ const initiateWebSocket = (httpServer) => {
 
             if (type === "create") {
                 rooms.set(roomCode, { host: connection, peer: null, offer: null })
-                console.log("🧑 Room created:", roomCode)
+                console.log("Room created:", roomCode)
             }
 
             if (type === "offer") {
@@ -24,7 +24,7 @@ const initiateWebSocket = (httpServer) => {
                 if (!room) return
 
                 room.offer = offer
-                console.log("📦 Offer stored for room:", roomCode)
+                console.log("Offer stored for room:", roomCode)
 
                 if (room.peer) {
                     console.log("Forwarding offer to waiting peer")
@@ -40,7 +40,7 @@ const initiateWebSocket = (httpServer) => {
                 }
 
                 room.peer = connection
-                console.log("👤 Peer joined room:", roomCode)
+                console.log("Peer joined room:", roomCode)
 
                 if (room.offer) {
                     console.log("Sending stored offer to peer")
