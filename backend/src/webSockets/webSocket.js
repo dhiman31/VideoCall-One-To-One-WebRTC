@@ -10,7 +10,7 @@ function getCloudflareTurnCredentials() {
 
         const options = {
             hostname: 'rtc.live.cloudflare.com',
-            path: `/v1/turn/keys/${CF_APP_ID}/credentials/generate`,
+            path: `/v1/turn/keys/${CF_APP_ID}/credentials/generate-ice-servers`, // ✅ SAHI ENDPOINT
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${CF_APP_SECRET}`,
@@ -21,15 +21,16 @@ function getCloudflareTurnCredentials() {
 
         const req = https.request(options, (res) => {
             let data = ''
+            console.log("Cloudflare HTTP status:", res.statusCode)
             res.on('data', chunk => data += chunk)
             res.on('end', () => {
+                console.log("Cloudflare raw response:", data)
                 try {
                     const json = JSON.parse(data)
-                    console.log("Cloudflare response:", JSON.stringify(json))
                     if (json.iceServers) {
                         resolve(json.iceServers)
                     } else {
-                        reject(new Error("No iceServers in response: " + data))
+                        reject(new Error("No iceServers: " + data))
                     }
                 } catch (e) {
                     reject(new Error("Parse error: " + data))
@@ -37,7 +38,11 @@ function getCloudflareTurnCredentials() {
             })
         })
 
-        req.on('error', reject)
+        req.on('error', (e) => {
+            console.error("HTTPS request error:", e.message)
+            reject(e)
+        })
+
         req.write(body)
         req.end()
     })
@@ -62,15 +67,11 @@ const initiateWebSocket = (httpServer) => {
 
             const { type, roomCode, offer, answer, candidate } = data
 
-            //TURN CREDENTIALS
             if (type === "get-turn-credentials") {
                 try {
                     const iceServers = await getCloudflareTurnCredentials()
                     console.log("TURN credentials sent to client")
-                    connection.send(JSON.stringify({
-                        type: "turn-credentials",
-                        iceServers
-                    }))
+                    connection.send(JSON.stringify({ type: "turn-credentials", iceServers }))
                 } catch (e) {
                     console.error("Cloudflare TURN error:", e.message)
                     connection.send(JSON.stringify({
@@ -84,28 +85,23 @@ const initiateWebSocket = (httpServer) => {
                 return
             }
 
-            //CREATE ROOM
             if (type === "create") {
                 rooms.set(roomCode, { host: connection, peer: null, offer: null })
                 console.log("Room created:", roomCode)
                 return
             }
 
-            //STORE OFFER
             if (type === "offer") {
                 const room = rooms.get(roomCode)
                 if (!room) return
                 room.offer = offer
                 console.log("Offer stored:", roomCode)
-            
                 if (room.peer) {
-                    console.log("Peer already waiting — sending offer now")
                     room.peer.send(JSON.stringify({ type: "offer", offer }))
                 }
                 return
             }
 
-            //JOIN ROOM
             if (type === "join") {
                 const room = rooms.get(roomCode)
                 if (!room) {
@@ -115,22 +111,18 @@ const initiateWebSocket = (httpServer) => {
                 room.peer = connection
                 console.log("Peer joined:", roomCode)
                 if (room.offer) {
-                    console.log("Sending stored offer to peer")
                     room.peer.send(JSON.stringify({ type: "offer", offer: room.offer }))
                 }
                 return
             }
 
-            //ANSWER
             if (type === "answer") {
                 const room = rooms.get(roomCode)
                 if (!room || !room.host) return
-                console.log("Forwarding answer to host:", roomCode)
                 room.host.send(JSON.stringify({ type: "answer", answer }))
                 return
             }
 
-            //ICE CANDIDATE
             if (type === "ice") {
                 const room = rooms.get(roomCode)
                 if (!room || !candidate) return
@@ -141,9 +133,7 @@ const initiateWebSocket = (httpServer) => {
                 return
             }
 
-            //LEAVE
             if (type === "leave") {
-                console.log("Leave received for room:", roomCode)
                 const room = rooms.get(roomCode)
                 if (!room) return
                 const other = room.host === connection ? room.peer : room.host
@@ -156,7 +146,6 @@ const initiateWebSocket = (httpServer) => {
             }
         })
 
-        //CLIENT DISCONNECT
         connection.on('close', () => {
             console.log("Client disconnected")
             for (const [code, room] of rooms.entries()) {
