@@ -104,6 +104,10 @@ export default function App() {
       }
 
       if (data.type === "offer") {
+        if (lcRef.current?.signalingState === "have-local-offer") {
+          console.log("Ignoring offer — we are the creator")
+          return
+        }
         if (!lcRef.current) await createPeerConnection()
         await lcRef.current.setRemoteDescription(data.offer)
         const answer = await lcRef.current.createAnswer()

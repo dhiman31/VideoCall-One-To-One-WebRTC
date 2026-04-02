@@ -91,7 +91,7 @@ const initiateWebSocket = (httpServer) => {
                 console.log("Peer joined room:", roomCode)
                 if (room.offer) {
                     console.log("Sending stored offer to peer")
-                    connection.send(JSON.stringify({ type: "offer", offer: room.offer }))
+                    room.peer.send(JSON.stringify({ type: "offer", offer: room.offer }))
                 }
             }
 
