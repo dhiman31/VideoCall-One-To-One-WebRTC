@@ -10,7 +10,9 @@ function Toast({ toasts }) {
   return (
     <div className="toast-container">
       {toasts.map(t => (
-        <div key={t.id} className={`toast toast--${t.type}`}>{t.message}</div>
+        <div key={t.id} className={`toast toast--${t.type}`}>
+          {t.message}
+        </div>
       ))}
     </div>
   )
@@ -49,7 +51,6 @@ export default function App() {
   const localVideoRef      = useRef(null)
   const remoteVideoRef     = useRef(null)
   const iceCandidateBuffer = useRef([])
-  const isCreatorRef       = useRef(false)   // creator vs joiner track karo
 
   useEffect(() => { roomCodeRef.current = roomCode }, [roomCode])
 
@@ -59,22 +60,28 @@ export default function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), duration)
   }
 
-  // Server se Cloudflare TURN credentials fetch karo
-async function getTurnCredentials() {
-    try {
-        const res = await fetch("https://videocall-server-8rr8.onrender.com/turn-credentials")
-        if (!res.ok) throw new Error("HTTP " + res.status)
-        const data = await res.json()
-        console.log("Got TURN ICE servers:", JSON.stringify(data.iceServers))
-        return data.iceServers
-    } catch (e) {
-        console.warn("TURN fetch failed, using STUN fallback:", e.message)
-        return [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" }
-        ]
-    }
-}
+  // TURN credentials server se fetch karo
+  function getTurnCredentials() {
+    return new Promise((resolve) => {
+      const ws = wsRef.current
+      ws.send(JSON.stringify({ type: "get-turn-credentials" }))
+
+      const handler = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.type === "turn-credentials") {
+          ws.removeEventListener("message", handler)
+          resolve(data.iceServers)
+        }
+      }
+      ws.addEventListener("message", handler)
+
+      // 5 sec timeout — fallback to STUN
+      setTimeout(() => {
+        ws.removeEventListener("message", handler)
+        resolve([{ urls: "stun:stun.l.google.com:19302" }])
+      }, 5000)
+    })
+  }
 
   useEffect(() => {
     const ws = new WebSocket("wss://videocall-server-8rr8.onrender.com")
@@ -83,10 +90,9 @@ async function getTurnCredentials() {
     ws.onopen = () => console.log("WS connected")
 
     ws.onmessage = async (event) => {
-      let data
-      try { data = JSON.parse(event.data) } catch { return }
+      const data = JSON.parse(event.data)
 
-      // turn-credentials — getTurnCredentials() handle karti hai
+      // turn-credentials handler getTurnCredentials() ke andar handle hoti hai
       if (data.type === "turn-credentials") return
 
       if (data.type === "error") {
@@ -97,83 +103,66 @@ async function getTurnCredentials() {
         return
       }
 
-      // ── OFFER ── sirf joiner handle kare
       if (data.type === "offer") {
-        if (isCreatorRef.current) {
-          console.log("Creator — ignoring offer")
+        if (lcRef.current?.signalingState === "have-local-offer") {
+          console.log("Ignoring offer — we are the creator")
           return
         }
-
         if (!lcRef.current) await createPeerConnection()
         await lcRef.current.setRemoteDescription(data.offer)
         const answer = await lcRef.current.createAnswer()
         await lcRef.current.setLocalDescription(answer)
-        wsRef.current.send(JSON.stringify({
-          type: "answer",
-          roomCode: roomCodeRef.current,
-          answer: lcRef.current.localDescription
-        }))
+        ws.send(JSON.stringify({ type: "answer", roomCode: roomCodeRef.current, answer: lcRef.current.localDescription }))
         setCallStatus("connecting")
 
-        // Buffered ICE candidates flush karo
-        for (const c of iceCandidateBuffer.current) {
-          try { await lcRef.current.addIceCandidate(c) } catch {}
+        for (const candidate of iceCandidateBuffer.current) {
+          try { await lcRef.current.addIceCandidate(candidate) } catch {}
         }
         iceCandidateBuffer.current = []
-        return
       }
 
-      // ── ANSWER ── sirf creator handle kare
       if (data.type === "answer") {
-        if (!isCreatorRef.current) {
-          console.log("Joiner — ignoring answer")
-          return
-        }
-        if (!lcRef.current) return
         await lcRef.current.setRemoteDescription(data.answer)
 
-        // Buffered ICE candidates flush karo
-        for (const c of iceCandidateBuffer.current) {
-          try { await lcRef.current.addIceCandidate(c) } catch {}
+        for (const candidate of iceCandidateBuffer.current) {
+          try { await lcRef.current.addIceCandidate(candidate) } catch {}
         }
         iceCandidateBuffer.current = []
-        return
       }
 
-      // ── ICE ───────────────────────────────────────────────────────
       if (data.type === "ice") {
-        if (!data.candidate || !lcRef.current) return
-        if (lcRef.current.remoteDescription) {
-          try { await lcRef.current.addIceCandidate(data.candidate) } catch {}
-        } else {
-          iceCandidateBuffer.current.push(data.candidate)
+        if (data.candidate && lcRef.current) {
+          if (lcRef.current.remoteDescription) {
+            try { await lcRef.current.addIceCandidate(data.candidate) } catch {}
+          } else {
+            iceCandidateBuffer.current.push(data.candidate)
+          }
         }
-        return
       }
 
       if (data.type === "peer-left") {
         addToast("The other person left the call", "info")
         setCallStatus("disconnected")
-        return
       }
     }
 
-    ws.onerror = () => addToast("WebSocket connection failed", "error")
-    ws.onclose = () => console.log("WS closed")
+    ws.onerror = () => addToast("WebSocket connection failed. Is the server running?", "error")
+    ws.onclose = () => {}
 
     return () => ws.close()
   }, [])
 
   async function createPeerConnection() {
+    // Pehle TURN credentials lo
     const iceServers = await getTurnCredentials()
-    console.log("Creating peer connection with:", JSON.stringify(iceServers))
+    console.log("ICE Servers:", iceServers)
 
     const lc = new RTCPeerConnection({ iceServers })
     lcRef.current = lc
 
     lc.onicecandidate = (e) => {
       if (e.candidate) {
-        console.log("Sending ICE type:", e.candidate.type)
+        console.log("TYPE:", e.candidate.type)
         wsRef.current.send(JSON.stringify({
           type: "ice",
           roomCode: roomCodeRef.current,
@@ -182,29 +171,28 @@ async function getTurnCredentials() {
       }
     }
 
-    lc.oniceconnectionstatechange = () => {
+    lc.oniceconnectionstatechange = async () => {
       console.log("ICE STATE:", lc.iceConnectionState)
       if (lc.iceConnectionState === "failed") {
-        console.log("ICE failed — restarting")
-        lc.restartIce()
+        console.log("ICE restart...")
+        await lc.restartIce()
       }
     }
 
-    lc.onconnectionstatechange = () => {
+    lc.onconnectionstatechange = async () => {
       const state = lc.connectionState
       console.log("CONNECTION STATE:", state)
       if (state === "connected") {
         setCallStatus("connected")
-        addToast("Call connected!", "success")
+        addToast("Call connected", "success")
       }
       if (state === "failed") {
-        console.log("Connection failed — restarting ICE")
-        lc.restartIce()
+        console.log("Restart ICE...")
+        await lc.restartIce()
       }
     }
 
     lc.ontrack = (e) => {
-      console.log("Remote track received")
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = e.streams[0]
       }
@@ -214,7 +202,7 @@ async function getTurnCredentials() {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
     } catch {
-      addToast("Camera/mic access denied", "error")
+      addToast("Camera/mic denied", "error")
       throw new Error("media denied")
     }
 
@@ -226,10 +214,9 @@ async function getTurnCredentials() {
   }
 
   function cleanup() {
-    isCreatorRef.current = false
-    iceCandidateBuffer.current = []
     lcRef.current?.close()
     lcRef.current = null
+    iceCandidateBuffer.current = []
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     if (localVideoRef.current)  localVideoRef.current.srcObject = null
@@ -242,28 +229,17 @@ async function getTurnCredentials() {
     if (!roomCode.trim()) { addToast("Enter or generate a room code first", "error"); return }
 
     try {
-      isCreatorRef.current = true
       setCallStatus("waiting")
       setActiveRoom(roomCode)
       setScreen("call")
-      await new Promise(r => setTimeout(r, 50)) // DOM render hone do
-
+      await new Promise(r => setTimeout(r, 50))
       await createPeerConnection()
-
       ws.send(JSON.stringify({ type: "create", roomCode: roomCodeRef.current }))
-
       const offer = await lcRef.current.createOffer()
       await lcRef.current.setLocalDescription(offer)
-
-      ws.send(JSON.stringify({
-        type: "offer",
-        roomCode: roomCodeRef.current,
-        offer: lcRef.current.localDescription
-      }))
-
-      addToast("Room created! Share the code.", "success")
-    } catch (e) {
-      console.error("createRoom error:", e)
+      ws.send(JSON.stringify({ type: "offer", roomCode: roomCodeRef.current, offer: lcRef.current.localDescription }))
+      addToast("Room created. Share the code with your peer.", "success")
+    } catch {
       cleanup()
       setCallStatus("idle")
       setScreen("lobby")
@@ -277,17 +253,13 @@ async function getTurnCredentials() {
     if (roomCode.trim().length < 4) { addToast("Room code is too short", "error"); return }
 
     try {
-      isCreatorRef.current = false
       setCallStatus("connecting")
       setActiveRoom(roomCode)
       setScreen("call")
-      await new Promise(r => setTimeout(r, 50)) // DOM render hone do
-
+      await new Promise(r => setTimeout(r, 50))
       await createPeerConnection()
-
       ws.send(JSON.stringify({ type: "join", roomCode: roomCodeRef.current }))
-    } catch (e) {
-      console.error("joinRoom error:", e)
+    } catch {
       cleanup()
       setCallStatus("idle")
       setScreen("lobby")
