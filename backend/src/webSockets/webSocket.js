@@ -1,36 +1,44 @@
 const websocket = require('websocket').server
 const https = require('https')
 
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID
-const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN
+const CF_APP_ID     = process.env.CF_APP_ID
+const CF_APP_SECRET = process.env.CF_APP_SECRET
 
-function getTwilioToken() {
+function getCloudflareTurnCredentials() {
     return new Promise((resolve, reject) => {
-        const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')
+        const body = JSON.stringify({ ttl: 86400 })
 
         const options = {
-            hostname: 'api.twilio.com',
-            path: `/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Tokens.json`,
+            hostname: 'rtc.live.cloudflare.com',
+            path: `/v1/turn/keys/${CF_APP_ID}/credentials/generate`,
             method: 'POST',
             headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Length': 0
+                'Authorization': `Bearer ${CF_APP_SECRET}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body)
             }
         }
 
         const req = https.request(options, (res) => {
-            let body = ''
-            res.on('data', d => body += d)
+            let data = ''
+            res.on('data', chunk => data += chunk)
             res.on('end', () => {
                 try {
-                    resolve(JSON.parse(body))
+                    const json = JSON.parse(data)
+                    console.log("Cloudflare response:", JSON.stringify(json))
+                    if (json.iceServers) {
+                        resolve(json.iceServers)
+                    } else {
+                        reject(new Error("No iceServers in response: " + data))
+                    }
                 } catch (e) {
-                    reject(e)
+                    reject(new Error("Parse error: " + data))
                 }
             })
         })
 
         req.on('error', reject)
+        req.write(body)
         req.end()
     })
 }
@@ -44,43 +52,60 @@ const initiateWebSocket = (httpServer) => {
         console.log("Client connected")
 
         connection.on('message', async (message) => {
-            const data = JSON.parse(message.utf8Data)
+            let data
+            try {
+                data = JSON.parse(message.utf8Data)
+            } catch {
+                console.error("Invalid JSON received")
+                return
+            }
+
             const { type, roomCode, offer, answer, candidate } = data
 
+            //TURN CREDENTIALS
             if (type === "get-turn-credentials") {
                 try {
-                    const token = await getTwilioToken()
+                    const iceServers = await getCloudflareTurnCredentials()
+                    console.log("TURN credentials sent to client")
                     connection.send(JSON.stringify({
                         type: "turn-credentials",
-                        iceServers: token.ice_servers
+                        iceServers
                     }))
-                    console.log("TURN credentials sent")
                 } catch (e) {
-                    console.error("Twilio error:", e.message)
+                    console.error("Cloudflare TURN error:", e.message)
                     connection.send(JSON.stringify({
                         type: "turn-credentials",
-                        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+                        iceServers: [
+                            { urls: "stun:stun.l.google.com:19302" },
+                            { urls: "stun:stun1.l.google.com:19302" }
+                        ]
                     }))
                 }
                 return
             }
 
+            //CREATE ROOM
             if (type === "create") {
                 rooms.set(roomCode, { host: connection, peer: null, offer: null })
                 console.log("Room created:", roomCode)
+                return
             }
 
+            //STORE OFFER
             if (type === "offer") {
                 const room = rooms.get(roomCode)
                 if (!room) return
                 room.offer = offer
-                console.log("Offer stored for room:", roomCode)
+                console.log("Offer stored:", roomCode)
+            
                 if (room.peer) {
-                    console.log("Forwarding offer to waiting peer")
+                    console.log("Peer already waiting — sending offer now")
                     room.peer.send(JSON.stringify({ type: "offer", offer }))
                 }
+                return
             }
 
+            //JOIN ROOM
             if (type === "join") {
                 const room = rooms.get(roomCode)
                 if (!room) {
@@ -88,20 +113,24 @@ const initiateWebSocket = (httpServer) => {
                     return
                 }
                 room.peer = connection
-                console.log("Peer joined room:", roomCode)
+                console.log("Peer joined:", roomCode)
                 if (room.offer) {
                     console.log("Sending stored offer to peer")
                     room.peer.send(JSON.stringify({ type: "offer", offer: room.offer }))
                 }
+                return
             }
 
+            //ANSWER
             if (type === "answer") {
                 const room = rooms.get(roomCode)
                 if (!room || !room.host) return
-                console.log("Forwarding answer to host")
+                console.log("Forwarding answer to host:", roomCode)
                 room.host.send(JSON.stringify({ type: "answer", answer }))
+                return
             }
 
+            //ICE CANDIDATE
             if (type === "ice") {
                 const room = rooms.get(roomCode)
                 if (!room || !candidate) return
@@ -109,32 +138,35 @@ const initiateWebSocket = (httpServer) => {
                 if (target && target.connected) {
                     target.send(JSON.stringify({ type: "ice", candidate }))
                 }
+                return
             }
 
+            //LEAVE
             if (type === "leave") {
-                for (const [code, room] of rooms.entries()) {
-                    if (room.host === connection || room.peer === connection) {
-                        const other = room.host === connection ? room.peer : room.host
-                        if (other) {
-                            try { other.send(JSON.stringify({ type: "peer-left" })) } catch {}
-                        }
-                        rooms.delete(code)
-                        console.log("Room deleted:", code)
-                    }
+                console.log("Leave received for room:", roomCode)
+                const room = rooms.get(roomCode)
+                if (!room) return
+                const other = room.host === connection ? room.peer : room.host
+                if (other && other.connected) {
+                    try { other.send(JSON.stringify({ type: "peer-left" })) } catch {}
                 }
+                rooms.delete(roomCode)
+                console.log("Room deleted:", roomCode)
+                return
             }
         })
 
+        //CLIENT DISCONNECT
         connection.on('close', () => {
             console.log("Client disconnected")
             for (const [code, room] of rooms.entries()) {
                 if (room.host === connection || room.peer === connection) {
                     const other = room.host === connection ? room.peer : room.host
-                    if (other) {
+                    if (other && other.connected) {
                         try { other.send(JSON.stringify({ type: "peer-left" })) } catch {}
                     }
                     rooms.delete(code)
-                    console.log("Room deleted:", code)
+                    console.log("Room deleted on disconnect:", code)
                 }
             }
         })

@@ -4,7 +4,6 @@ const PORT = process.env.PORT || 3000
 const httpServer = http.createServer()
 
 httpServer.listen(PORT, () => {
-    console.log("The http server started on PORT", PORT)
-    
+    console.log("HTTP server started on PORT", PORT)
     initiateWebSocket(httpServer)
 })
