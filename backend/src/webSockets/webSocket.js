@@ -1,52 +1,4 @@
 const websocket = require('websocket').server
-const https = require('https')
-
-const CF_APP_ID     = process.env.CF_APP_ID
-const CF_APP_SECRET = process.env.CF_APP_SECRET
-
-function getCloudflareTurnCredentials() {
-    return new Promise((resolve, reject) => {
-        const body = JSON.stringify({ ttl: 86400 })
-
-        const options = {
-            hostname: 'rtc.live.cloudflare.com',
-            path: `/v1/turn/keys/${CF_APP_ID}/credentials/generate-ice-servers`, // ✅ SAHI ENDPOINT
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${CF_APP_SECRET}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(body)
-            }
-        }
-
-        const req = https.request(options, (res) => {
-            let data = ''
-            console.log("Cloudflare HTTP status:", res.statusCode)
-            res.on('data', chunk => data += chunk)
-            res.on('end', () => {
-                console.log("Cloudflare raw response:", data)
-                try {
-                    const json = JSON.parse(data)
-                    if (json.iceServers) {
-                        resolve(json.iceServers)
-                    } else {
-                        reject(new Error("No iceServers: " + data))
-                    }
-                } catch (e) {
-                    reject(new Error("Parse error: " + data))
-                }
-            })
-        })
-
-        req.on('error', (e) => {
-            console.error("HTTPS request error:", e.message)
-            reject(e)
-        })
-
-        req.write(body)
-        req.end()
-    })
-}
 
 const initiateWebSocket = (httpServer) => {
     const WebSocketServer = new websocket({ httpServer })
@@ -66,24 +18,6 @@ const initiateWebSocket = (httpServer) => {
             }
 
             const { type, roomCode, offer, answer, candidate } = data
-
-            if (type === "get-turn-credentials") {
-                try {
-                    const iceServers = await getCloudflareTurnCredentials()
-                    console.log("TURN credentials sent to client")
-                    connection.send(JSON.stringify({ type: "turn-credentials", iceServers }))
-                } catch (e) {
-                    console.error("Cloudflare TURN error:", e.message)
-                    connection.send(JSON.stringify({
-                        type: "turn-credentials",
-                        iceServers: [
-                            { urls: "stun:stun.l.google.com:19302" },
-                            { urls: "stun:stun1.l.google.com:19302" }
-                        ]
-                    }))
-                }
-                return
-            }
 
             if (type === "create") {
                 rooms.set(roomCode, { host: connection, peer: null, offer: null })

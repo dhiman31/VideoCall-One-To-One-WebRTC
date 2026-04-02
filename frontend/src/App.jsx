@@ -60,38 +60,21 @@ export default function App() {
   }
 
   // Server se Cloudflare TURN credentials fetch karo
-  function getTurnCredentials() {
-    return new Promise((resolve) => {
-      const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        resolve([{ urls: "stun:stun.l.google.com:19302" }])
-        return
-      }
-
-      const handler = (event) => {
-        let data
-        try { data = JSON.parse(event.data) } catch { return }
-        if (data.type === "turn-credentials") {
-          ws.removeEventListener("message", handler)
-          console.log("Got ICE servers:", JSON.stringify(data.iceServers))
-          resolve(data.iceServers)
-        }
-      }
-
-      ws.addEventListener("message", handler)
-      ws.send(JSON.stringify({ type: "get-turn-credentials" }))
-
-      // 6 sec timeout — fallback to STUN only
-      setTimeout(() => {
-        ws.removeEventListener("message", handler)
-        console.warn("TURN credentials timeout — using STUN fallback")
-        resolve([
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" }
-        ])
-      }, 6000)
-    })
-  }
+async function getTurnCredentials() {
+    try {
+        const res = await fetch("https://videocall-server-8rr8.onrender.com/turn-credentials")
+        if (!res.ok) throw new Error("HTTP " + res.status)
+        const data = await res.json()
+        console.log("Got TURN ICE servers:", JSON.stringify(data.iceServers))
+        return data.iceServers
+    } catch (e) {
+        console.warn("TURN fetch failed, using STUN fallback:", e.message)
+        return [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" }
+        ]
+    }
+}
 
   useEffect(() => {
     const ws = new WebSocket("wss://videocall-server-8rr8.onrender.com")
