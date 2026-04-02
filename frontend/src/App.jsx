@@ -44,12 +44,13 @@ export default function App() {
   const [copied, setCopied]         = useState(false)
   const [activeRoom, setActiveRoom] = useState("")
 
-  const roomCodeRef    = useRef("")
-  const wsRef          = useRef(null)
-  const lcRef          = useRef(null)
-  const streamRef      = useRef(null)
-  const localVideoRef  = useRef(null)
-  const remoteVideoRef = useRef(null)
+  const roomCodeRef        = useRef("")
+  const wsRef              = useRef(null)
+  const lcRef              = useRef(null)
+  const streamRef          = useRef(null)
+  const localVideoRef      = useRef(null)
+  const remoteVideoRef     = useRef(null)
+  const iceCandidateBuffer = useRef([])
 
   useEffect(() => { roomCodeRef.current = roomCode }, [roomCode])
 
@@ -57,6 +58,29 @@ export default function App() {
     const id = Date.now()
     setToasts(t => [...t, { id, message, type }])
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), duration)
+  }
+
+  // TURN credentials server se fetch karo
+  function getTurnCredentials() {
+    return new Promise((resolve) => {
+      const ws = wsRef.current
+      ws.send(JSON.stringify({ type: "get-turn-credentials" }))
+
+      const handler = (event) => {
+        const data = JSON.parse(event.data)
+        if (data.type === "turn-credentials") {
+          ws.removeEventListener("message", handler)
+          resolve(data.iceServers)
+        }
+      }
+      ws.addEventListener("message", handler)
+
+      // 5 sec timeout — fallback to STUN
+      setTimeout(() => {
+        ws.removeEventListener("message", handler)
+        resolve([{ urls: "stun:stun.l.google.com:19302" }])
+      }, 5000)
+    })
   }
 
   useEffect(() => {
@@ -67,6 +91,9 @@ export default function App() {
 
     ws.onmessage = async (event) => {
       const data = JSON.parse(event.data)
+
+      // turn-credentials handler getTurnCredentials() ke andar handle hoti hai
+      if (data.type === "turn-credentials") return
 
       if (data.type === "error") {
         addToast(data.message || "Something went wrong", "error")
@@ -83,15 +110,29 @@ export default function App() {
         await lcRef.current.setLocalDescription(answer)
         ws.send(JSON.stringify({ type: "answer", roomCode: roomCodeRef.current, answer: lcRef.current.localDescription }))
         setCallStatus("connecting")
+
+        for (const candidate of iceCandidateBuffer.current) {
+          try { await lcRef.current.addIceCandidate(candidate) } catch {}
+        }
+        iceCandidateBuffer.current = []
       }
 
       if (data.type === "answer") {
         await lcRef.current.setRemoteDescription(data.answer)
+
+        for (const candidate of iceCandidateBuffer.current) {
+          try { await lcRef.current.addIceCandidate(candidate) } catch {}
+        }
+        iceCandidateBuffer.current = []
       }
 
       if (data.type === "ice") {
         if (data.candidate && lcRef.current) {
-          try { await lcRef.current.addIceCandidate(data.candidate) } catch {}
+          if (lcRef.current.remoteDescription) {
+            try { await lcRef.current.addIceCandidate(data.candidate) } catch {}
+          } else {
+            iceCandidateBuffer.current.push(data.candidate)
+          }
         }
       }
 
@@ -107,98 +148,71 @@ export default function App() {
     return () => ws.close()
   }, [])
 
-    async function createPeerConnection() {
+  async function createPeerConnection() {
+    // Pehle TURN credentials lo
+    const iceServers = await getTurnCredentials()
+    console.log("ICE Servers:", iceServers)
 
-      const lc = new RTCPeerConnection({
-        iceServers: [
-          {
-            urls: "stun:stun.relay.metered.ca:80",
-          },
-          {
-            urls: [
-              "turn:global.relay.metered.ca:80",
-              "turn:global.relay.metered.ca:80?transport=tcp",
-              "turn:global.relay.metered.ca:443",
-              "turns:global.relay.metered.ca:443?transport=tcp"
-            ],
-            username: "bea3751cce1449498b386359",
-            credential: "UJ2SSke/eN6QRppG",
-          },
-        ],
-      });
+    const lc = new RTCPeerConnection({ iceServers })
+    lcRef.current = lc
 
-      lcRef.current = lc;
-
-      lc.onicecandidate = (e) => {
-        if (e.candidate) {
-          console.log("TYPE:", e.candidate.type);
-          wsRef.current.send(JSON.stringify({
-            type: "ice",
-            roomCode: roomCodeRef.current,
-            candidate: e.candidate
-          }));
-        }
-      };
-
-      lc.oniceconnectionstatechange = async () => {
-        console.log("ICE STATE:", lc.iceConnectionState);
-
-        if (lc.iceConnectionState === "failed") {
-          console.log("ICE restart...");
-          await lc.restartIce();
-        }
-      };
-
-      lc.onconnectionstatechange = async () => {
-        const state = lc.connectionState;
-        console.log("CONNECTION STATE:", state);
-
-        if (state === "connected") {
-          setCallStatus("connected");
-          addToast("Call connected", "success");
-        }
-
-        if (state === "disconnected") {
-          console.log("Trying to recover...");
-        }
-
-        if (state === "failed") {
-          console.log("Restart ICE...");
-          await lc.restartIce();
-        }
-      };
-
-      lc.ontrack = (e) => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = e.streams[0];
-        }
-      };
-
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true
-        });
-      } catch {
-        addToast("Camera/mic denied", "error");
-        throw new Error("media denied");
+    lc.onicecandidate = (e) => {
+      if (e.candidate) {
+        console.log("TYPE:", e.candidate.type)
+        wsRef.current.send(JSON.stringify({
+          type: "ice",
+          roomCode: roomCodeRef.current,
+          candidate: e.candidate
+        }))
       }
-
-      streamRef.current = stream;
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      stream.getTracks().forEach(track => lc.addTrack(track, stream));
-
-      return lc;
     }
+
+    lc.oniceconnectionstatechange = async () => {
+      console.log("ICE STATE:", lc.iceConnectionState)
+      if (lc.iceConnectionState === "failed") {
+        console.log("ICE restart...")
+        await lc.restartIce()
+      }
+    }
+
+    lc.onconnectionstatechange = async () => {
+      const state = lc.connectionState
+      console.log("CONNECTION STATE:", state)
+      if (state === "connected") {
+        setCallStatus("connected")
+        addToast("Call connected", "success")
+      }
+      if (state === "failed") {
+        console.log("Restart ICE...")
+        await lc.restartIce()
+      }
+    }
+
+    lc.ontrack = (e) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = e.streams[0]
+      }
+    }
+
+    let stream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    } catch {
+      addToast("Camera/mic denied", "error")
+      throw new Error("media denied")
+    }
+
+    streamRef.current = stream
+    if (localVideoRef.current) localVideoRef.current.srcObject = stream
+    stream.getTracks().forEach(track => lc.addTrack(track, stream))
+
+    return lc
+  }
 
   function cleanup() {
     lcRef.current?.close()
     lcRef.current = null
+    iceCandidateBuffer.current = []
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     if (localVideoRef.current)  localVideoRef.current.srcObject = null
@@ -213,16 +227,18 @@ export default function App() {
     try {
       setCallStatus("waiting")
       setActiveRoom(roomCode)
+      setScreen("call")
+      await new Promise(r => setTimeout(r, 50))
       await createPeerConnection()
       ws.send(JSON.stringify({ type: "create", roomCode: roomCodeRef.current }))
       const offer = await lcRef.current.createOffer()
       await lcRef.current.setLocalDescription(offer)
       ws.send(JSON.stringify({ type: "offer", roomCode: roomCodeRef.current, offer: lcRef.current.localDescription }))
-      setScreen("call")
       addToast("Room created. Share the code with your peer.", "success")
     } catch {
       cleanup()
       setCallStatus("idle")
+      setScreen("lobby")
     }
   }
 
@@ -235,9 +251,10 @@ export default function App() {
     try {
       setCallStatus("connecting")
       setActiveRoom(roomCode)
+      setScreen("call")
+      await new Promise(r => setTimeout(r, 50))
       await createPeerConnection()
       ws.send(JSON.stringify({ type: "join", roomCode: roomCodeRef.current }))
-      setScreen("call")
     } catch {
       cleanup()
       setCallStatus("idle")
@@ -276,7 +293,6 @@ export default function App() {
     <>
       <Toast toasts={toasts} />
 
-      {/* LOBBY */}
       {screen === "lobby" && (
         <div className="lobby-wrap">
           <div className="card">
@@ -284,10 +300,8 @@ export default function App() {
               <div className="logo-icon" />
               <span className="logo-text">Link<strong>Call</strong></span>
             </div>
-
             <h1 className="headline">Start a video call</h1>
             <p className="subtitle">No sign-up. Share a code, connect instantly.</p>
-
             <label className="field-label">Room Code</label>
             <div className="input-wrap">
               <input
@@ -298,23 +312,16 @@ export default function App() {
                 onKeyDown={e => e.key === "Enter" && joinRoom()}
                 maxLength={8}
               />
-              <button
-                className="btn-gen"
-                title="Generate random code"
-                onClick={() => setRoomCode(generateRoomId())}
-              >
+              <button className="btn-gen" title="Generate random code" onClick={() => setRoomCode(generateRoomId())}>
                 &#8635;
               </button>
             </div>
             <p className="hint">Click &#8635; to generate a random code or type your own</p>
-
             <div className="btn-row">
               <button className="btn btn--primary" onClick={createRoom}>Create Room</button>
               <button className="btn btn--secondary" onClick={joinRoom}>Join Room</button>
             </div>
-
             <div className="divider"><span>how it works</span></div>
-
             <ol className="steps">
               <li>Generate or type a room code</li>
               <li>Click Create Room and share the code</li>
@@ -324,7 +331,6 @@ export default function App() {
         </div>
       )}
 
-      {/* CALL */}
       {screen === "call" && (
         <div className="call-wrap">
           <div className="call-header">
