@@ -60,7 +60,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    const ws = new WebSocket(`ws://${process.env.serverURL}:3000`)
+    const ws = new WebSocket("wss://videocall-server-8rr8.onrender.com")
     wsRef.current = ws
 
     ws.onopen = () => console.log("WS connected")
@@ -107,45 +107,94 @@ export default function App() {
     return () => ws.close()
   }, [])
 
-  async function createPeerConnection() {
-    const lc = new RTCPeerConnection({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" }
-      ]
-    })
-    lcRef.current = lc
+    async function createPeerConnection() {
 
-    lc.onicecandidate = (e) => {
-      if (e.candidate) {
-        wsRef.current.send(JSON.stringify({ type: "ice", roomCode: roomCodeRef.current, candidate: e.candidate }))
+      const lc = new RTCPeerConnection({
+        iceServers: [
+          {
+            urls: "stun:stun.relay.metered.ca:80",
+          },
+          {
+            urls: [
+              "turn:global.relay.metered.ca:80",
+              "turn:global.relay.metered.ca:80?transport=tcp",
+              "turn:global.relay.metered.ca:443",
+              "turns:global.relay.metered.ca:443?transport=tcp"
+            ],
+            username: "bea3751cce1449498b386359",
+            credential: "UJ2SSke/eN6QRppG",
+          },
+        ],
+      });
+
+      lcRef.current = lc;
+
+      lc.onicecandidate = (e) => {
+        if (e.candidate) {
+          console.log("TYPE:", e.candidate.type);
+          wsRef.current.send(JSON.stringify({
+            type: "ice",
+            roomCode: roomCodeRef.current,
+            candidate: e.candidate
+          }));
+        }
+      };
+
+      lc.oniceconnectionstatechange = async () => {
+        console.log("ICE STATE:", lc.iceConnectionState);
+
+        if (lc.iceConnectionState === "failed") {
+          console.log("ICE restart...");
+          await lc.restartIce();
+        }
+      };
+
+      lc.onconnectionstatechange = async () => {
+        const state = lc.connectionState;
+        console.log("CONNECTION STATE:", state);
+
+        if (state === "connected") {
+          setCallStatus("connected");
+          addToast("Call connected", "success");
+        }
+
+        if (state === "disconnected") {
+          console.log("Trying to recover...");
+        }
+
+        if (state === "failed") {
+          console.log("Restart ICE...");
+          await lc.restartIce();
+        }
+      };
+
+      lc.ontrack = (e) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = e.streams[0];
+        }
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
+      } catch {
+        addToast("Camera/mic denied", "error");
+        throw new Error("media denied");
       }
-    }
 
-    lc.ontrack = (e) => {
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]
-      setCallStatus("connected")
-    }
+      streamRef.current = stream;
 
-    lc.onconnectionstatechange = () => {
-      const state = lc.connectionState
-      if (state === "connected")                           { setCallStatus("connected"); addToast("Call connected", "success") }
-      if (state === "disconnected" || state === "failed")  { setCallStatus("disconnected"); addToast("Connection lost", "error") }
-    }
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
 
-    let stream
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-    } catch {
-      addToast("Camera/mic access denied. Please allow permissions.", "error")
-      throw new Error("media denied")
-    }
+      stream.getTracks().forEach(track => lc.addTrack(track, stream));
 
-    streamRef.current = stream
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream
-    stream.getTracks().forEach(track => lc.addTrack(track, stream))
-    return lc
-  }
+      return lc;
+    }
 
   function cleanup() {
     lcRef.current?.close()

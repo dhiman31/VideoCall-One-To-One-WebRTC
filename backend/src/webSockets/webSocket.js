@@ -61,8 +61,12 @@ const initiateWebSocket = (httpServer) => {
                 if (!room || !candidate) return
 
                 const target = connection === room.host ? room.peer : room.host
-                if (target) {
-                    target.send(JSON.stringify({ type: "ice", candidate }))
+
+                if (target && target.connected) {
+                    target.send(JSON.stringify({
+                        type: "ice",
+                        candidate
+                    }))
                 }
             }
         })
